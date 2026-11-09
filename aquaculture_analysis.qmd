@@ -1,0 +1,205 @@
+---
+title: "EDS 223 Homework Assignment 3"
+subtitle: "Prioritizing potential aquaculture"
+author: "Rachel Miller"
+date: 2026-11-07
+format:
+  pdf:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+## Background
+Marine aquaculture is a potential avenue for a more sustainable source of protein than livestock production on land. This analysis aims to identify Exclusive Economic Zones (EEZ) on the West Coast of the United States of America that are most suitable for aquaculture depending on species. The most suitable locations are established based on a provided range of suitable sea surface temperature (SST) and depth values for the respective species.
+
+## Load Packages and Source Functions
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(here)
+library(terra)
+```
+
+## Import Data
+```{r}
+# Read in shapefile for West Coast EEZ
+w_coast_eez <- sf::st_read(here::here("data", "wc_regions_clean.shp"))
+# Read in bathymetry raster data
+depth <- rast(here::here("data","depth.tif"))
+
+# Read in SST raster data
+sst_raster <- c(
+  rast('data/average_annual_sst_2008.tif'),
+  rast('data/average_annual_sst_2009.tif'),
+  rast('data/average_annual_sst_2010.tif'),
+  rast('data/average_annual_sst_2011.tif'),
+  rast('data/average_annual_sst_2012.tif')
+  )
+```
+
+## Data Processing and Cleaning
+```{r}
+# Check that SST raster crs match (check sst, depth and eez)
+if(st_crs(sst_raster) == st_crs(depth) & st_crs(sst_raster) == st_crs(w_coast_eez)) {
+  print("CRS MATCH")
+}else{
+  warning("CRS NOT A MATCH")
+}
+```
+
+```{r}
+#Calculate mean sea surface temperature from 2008 to 2012
+mean_sst <- mean(sst_raster, na.rm = TRUE)
+
+# Convert mean sea surface temperature from Kelvin to Celsius
+mean_sst <- mean_sst - 273.15
+```
+
+```{r}
+# Resample depth data to match SST data resolution and extent
+#| results: hold
+
+resampled_depth <- resample(depth, y = mean_sst, method = "bilinear")
+resampled_depth <- project(resampled_depth, mean_sst) # ensure crs match
+
+# Check if crs resolution and extent match by stacking
+stack <- c(mean_sst, resampled_depth)
+```
+
+## Identify suitable locations for oysters
+The analysis is first applied to oysters to determine which EEZ on the west coast are most suitable for oyster aquaculture. Research has shown that oysters need the following conditions for optimal growth:
+
+sea surface temperature(sst): 11-30°C
+
+depth: 0-70 meters below sea level
+
+The temperature and depth data must be reclassified depending on whether it has the conditions for optimal growth or not.
+```{r}
+# Create sst reclassification matrix
+rcl_temp <- matrix(c(11, 30, 1,
+                -Inf, 11, 0,
+                30, Inf, 0),
+                ncol = 3, byrow = TRUE)
+
+# Reclassify sst data
+reclass_sst <- classify(mean_sst, rcl = rcl_temp)
+```
+
+```{r}
+# Create depth reclassification matrix
+depth_rcl <- matrix(c(-70, 0, 1,
+                      -Inf, -70, 0,
+                      0, Inf, 0),
+                      ncol = 3, byrow = TRUE)
+
+# Reclassify depth data
+reclass_depth <- classify(resampled_depth, rcl = depth_rcl)
+```
+```{r}
+# Reclassify to identify sst and depth suitable conditions
+oyster_suitable <- lapp(c(reclass_sst, reclass_depth), fun = function(t,d) t*d)
+names(oyster_suitable) <- "oyster suitability"
+```
+
+## Determine most suitable EEZ
+From the reclassification, suitable cells are denoted as 1, and unsuitable cells are denoted as 0. This is then used to calculate the total area with optimal conditions for oyster growth in each EEZ.
+
+```{r}
+# Rasterize west coast eez data
+eez_raster <- as.factor(rasterize(w_coast_eez, oyster_suitable, field = "rgn_id"))
+```
+
+```{r}
+# Calculate cell area
+area <- cellSize(eez_raster, unit = 'km')
+
+# Calculate total area suitable for oysters per zone
+suitable_area <- lapp(c(area, oyster_suitable), fun = function(a,s) a * s) # multiply function
+suitable_area_eez <- zonal(suitable_area, eez_raster, fun = 'sum', na.rm = TRUE, as.raster = TRUE)
+names(suitable_area_eez) <- "Suitable Area (km^2)"
+```
+
+## Map Data
+The total area with optimal conditions for oyster growth in each EEZ is used to create a map displaying each zone.
+```{r}
+tm_shape(suitable_area_eez) +
+  tm_raster() +
+  tm_basemap('OpenStreetMap') +
+  tm_title('Oyster Aquaculture EEZ Zones by Suitability') +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("left", "top"))
+```
+
+According to this map, California has the most potential for oyster aquaculture with over 4000 km^2 of suitable area, followed by Washington, then Oregon, which both still have over 1000 km^2 of suitable area.
+
+## Create a Function
+
+The code used previously to analyze the total suitable area in each EEZ is integrated into a function that takes inputs of species name, mininmum and maximum temperature in degrees Celcius, and minimum and maximum depth in m. The function outputs a map of aquaculture EEZ zones by suitability customized to the inputted species information.
+
+```{r}
+suitable_eez_map <- function(tmin = 11, tmax = 30, dmin = -70, dmax = 0, species = 'Oyster'){
+# Create sst reclassification matrix
+rcl_temp <- matrix(c(tmin, tmax, 1,
+                -Inf, tmin, 0,
+                tmax, Inf, 0),
+                ncol = 3, byrow = TRUE)
+
+# Reclassify sst data
+reclass_sst <- classify(mean_sst, rcl = rcl_temp)
+
+# Create depth reclassification matrix
+depth_rcl <- matrix(c(dmin, dmax, 1,
+                      -Inf, dmin, 0,
+                      dmax, Inf, 0),
+                      ncol = 3, byrow = TRUE)
+
+# Reclassify depth data
+reclass_depth <- classify(resampled_depth, rcl = depth_rcl)
+
+# Confirm that crs of reclassified sst and depth match
+if(st_crs(reclass_sst) != st_crs(reclass_depth)) stop("crs do not match")
+
+# Reclassify to identify suitable sst and depth conditions
+suitable <- lapp(c(reclass_sst, reclass_depth), fun = function(t,d) t*d)
+
+# Rasterize west coast eez data
+eez_raster <- as.factor(rasterize(w_coast_eez, suitable, field = "rgn_id"))
+
+# Calculate cell area
+area <- cellSize(eez_raster, unit = 'km')
+
+# Calculate total area suitable for species per zone
+suitable_area <- lapp(c(area, suitable), fun = function(a,s) a * s) # multiply function
+suitable_area_eez <- zonal(suitable_area, eez_raster, fun = 'sum', na.rm = TRUE, as.raster = TRUE)
+names(suitable_area_eez) <- "Suitable Area (km^2)"
+
+# Map 
+tm_shape(suitable_area_eez) +
+  tm_raster() +
+  tm_basemap('OpenStreetMap') +
+  tm_title(paste0(species, ' Aquaculture EEZ Zones by Suitability')) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("left", "top"))
+}
+```
+The function is tested using another species - Pandalus jordani, more commonly known as the Ocean shrimp. This is an edible species with an ideal depth range from 36 - 457 m and an ideal temperature range of 6°C - 12°C.
+
+```{r}
+suitable_eez_map(6, 12, -457, -36, 'Ocean Shrimp')
+```
+
+According to this map, Oregon has the most potential for Ocean Shrimp aquaculture with somewhere between 15,000-20,000 km^2 of suitable area, followed by Washington with 10,000-15,000 km^2 of suitable area. California has the least potential for Ocean Shrimp aquaculture on the West Coast, but still has some suitable areas. 
+
+
+## References
+Gridded bathymetry data. (n.d.). GEBCO. https://www.gebco.net/data-products/gridded-bathymetry-data#area
+
+Pauly, D., & Palomares, M. L. D. (Eds.). (2026). SeaLifeBase. SeaLifeBase. Retrieved November 7, 2026, from https://www.sealifebase.ca/search.php
+
+VLIZ. (n.d.). EEZ boundaries. Marineregions.org. Retrieved November 7, 2026, from https://www.marineregions.org/eez.php
+
+Watch, N. C. R. (n.d.). NOAA Coral Reef Watch Daily 5km Satellite Coral Bleaching Heat Stress SST Anomaly Product (Version 3.1). Coral Reef Watch. Retrieved November 7, 2026, from https://coralreefwatch.noaa.gov/product/5km/index_5km_ssta.php
